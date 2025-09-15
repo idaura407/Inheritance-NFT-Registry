@@ -7,6 +7,11 @@
 (define-constant err-invalid-beneficiary (err u105))
 (define-constant err-already-exists (err u106))
 (define-constant err-inactive-inheritance (err u107))
+(define-constant err-guardian-not-found (err u108))
+(define-constant err-already-approved (err u109))
+(define-constant err-insufficient-approvals (err u110))
+(define-constant err-invalid-guardian (err u111))
+(define-constant err-max-guardians-exceeded (err u112))
 
 (define-data-var inheritance-counter uint u0)
 
@@ -21,6 +26,8 @@
         claimed: bool,
         active: bool,
         created-at: uint,
+        required-approvals: uint,
+        current-approvals: uint,
     }
 )
 
@@ -30,6 +37,22 @@
         token-id: uint,
     }
     uint
+)
+
+(define-map inheritance-guardians
+    {
+        inheritance-id: uint,
+        guardian: principal,
+    }
+    {
+        approved: bool,
+        approved-at: (optional uint),
+    }
+)
+
+(define-map inheritance-guardian-list
+    uint
+    (list 10 principal)
 )
 
 (define-read-only (get-inheritance (inheritance-id uint))
@@ -59,6 +82,9 @@
             (get active inheritance)
             (>= stacks-block-height (get unlock-height inheritance))
             (not (get claimed inheritance))
+            (>= (get current-approvals inheritance)
+                (get required-approvals inheritance)
+            )
         )
         false
     )
@@ -70,9 +96,17 @@
             "claimed"
             (if (not (get active inheritance))
                 "inactive"
-                (if (>= stacks-block-height (get unlock-height inheritance))
+                (if (and
+                        (>= stacks-block-height (get unlock-height inheritance))
+                        (>= (get current-approvals inheritance)
+                            (get required-approvals inheritance)
+                        )
+                    )
                     "unlocked"
-                    "locked"
+                    (if (>= stacks-block-height (get unlock-height inheritance))
+                        "pending-approval"
+                        "locked"
+                    )
                 )
             )
         )
@@ -89,12 +123,20 @@
         (token-id uint)
         (beneficiary principal)
         (unlock-delay uint)
+        (guardians (list 10 principal))
+        (required-approvals uint)
     )
     (let (
             (inheritance-id (+ (var-get inheritance-counter) u1))
             (unlock-height (+ stacks-block-height unlock-delay))
+            (guardian-count (len guardians))
         )
         (asserts! (not (is-eq tx-sender beneficiary)) err-invalid-beneficiary)
+        (asserts! (<= guardian-count u10) err-max-guardians-exceeded)
+        (asserts! (<= required-approvals guardian-count)
+            err-insufficient-approvals
+        )
+        (asserts! (> required-approvals u0) err-insufficient-approvals)
         (asserts!
             (is-none (map-get? nft-inheritance-map {
                 contract: nft-contract,
@@ -112,7 +154,11 @@
             claimed: false,
             active: true,
             created-at: stacks-block-height,
+            required-approvals: required-approvals,
+            current-approvals: u0,
         })
+
+        (map-set inheritance-guardian-list inheritance-id guardians)
 
         (map-set nft-inheritance-map {
             contract: nft-contract,
@@ -245,6 +291,8 @@
             active: (get active inheritance),
             created-at: (get created-at inheritance),
             status: (get-inheritance-status inheritance-id),
+            required-approvals: (get required-approvals inheritance),
+            current-approvals: (get current-approvals inheritance),
         })
         err-not-found
     )
@@ -326,6 +374,9 @@
             (get active inheritance)
             (not (get claimed inheritance))
             (>= stacks-block-height (get unlock-height inheritance))
+            (>= (get current-approvals inheritance)
+                (get required-approvals inheritance)
+            )
         )
         false
     )
@@ -338,5 +389,114 @@
             (- (get unlock-height inheritance) stacks-block-height)
         )
         u0
+    )
+)
+
+(define-public (approve-inheritance (inheritance-id uint))
+    (match (get-inheritance inheritance-id)
+        inheritance (begin
+            (asserts! (get active inheritance) err-inactive-inheritance)
+            (asserts! (not (get claimed inheritance)) err-already-claimed)
+
+            (let (
+                    (guardian-key {
+                        inheritance-id: inheritance-id,
+                        guardian: tx-sender,
+                    })
+                    (current-approval (map-get? inheritance-guardians guardian-key))
+                    (guardians-list (default-to (list)
+                        (map-get? inheritance-guardian-list inheritance-id)
+                    ))
+                )
+                (asserts! (is-some (index-of guardians-list tx-sender))
+                    err-unauthorized
+                )
+                (asserts! (is-none current-approval) err-already-approved)
+
+                (map-set inheritance-guardians guardian-key {
+                    approved: true,
+                    approved-at: (some stacks-block-height),
+                })
+
+                (let ((new-approval-count (+ (get current-approvals inheritance) u1)))
+                    (map-set inheritances inheritance-id
+                        (merge inheritance { current-approvals: new-approval-count })
+                    )
+                    (ok new-approval-count)
+                )
+            )
+        )
+        err-not-found
+    )
+)
+
+(define-public (revoke-approval (inheritance-id uint))
+    (match (get-inheritance inheritance-id)
+        inheritance (begin
+            (asserts! (get active inheritance) err-inactive-inheritance)
+            (asserts! (not (get claimed inheritance)) err-already-claimed)
+
+            (let (
+                    (guardian-key {
+                        inheritance-id: inheritance-id,
+                        guardian: tx-sender,
+                    })
+                    (current-approval (map-get? inheritance-guardians guardian-key))
+                    (guardians-list (default-to (list)
+                        (map-get? inheritance-guardian-list inheritance-id)
+                    ))
+                )
+                (asserts! (is-some (index-of guardians-list tx-sender))
+                    err-unauthorized
+                )
+                (asserts! (is-some current-approval) err-guardian-not-found)
+
+                (map-delete inheritance-guardians guardian-key)
+
+                (let ((new-approval-count (- (get current-approvals inheritance) u1)))
+                    (map-set inheritances inheritance-id
+                        (merge inheritance { current-approvals: new-approval-count })
+                    )
+                    (ok new-approval-count)
+                )
+            )
+        )
+        err-not-found
+    )
+)
+
+(define-read-only (get-guardian-approval
+        (inheritance-id uint)
+        (guardian principal)
+    )
+    (map-get? inheritance-guardians {
+        inheritance-id: inheritance-id,
+        guardian: guardian,
+    })
+)
+
+(define-read-only (get-inheritance-guardians (inheritance-id uint))
+    (map-get? inheritance-guardian-list inheritance-id)
+)
+
+(define-read-only (is-guardian
+        (inheritance-id uint)
+        (guardian principal)
+    )
+    (let ((guardians-list (default-to (list) (map-get? inheritance-guardian-list inheritance-id))))
+        (is-some (index-of guardians-list guardian))
+    )
+)
+
+(define-read-only (get-approval-progress (inheritance-id uint))
+    (match (get-inheritance inheritance-id)
+        inheritance (ok {
+            current-approvals: (get current-approvals inheritance),
+            required-approvals: (get required-approvals inheritance),
+            is-fully-approved: (>= (get current-approvals inheritance)
+                (get required-approvals inheritance)
+            ),
+        })
+        err-not-found
     )
 )
