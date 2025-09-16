@@ -12,8 +12,12 @@
 (define-constant err-insufficient-approvals (err u110))
 (define-constant err-invalid-guardian (err u111))
 (define-constant err-max-guardians-exceeded (err u112))
+(define-constant err-template-not-found (err u113))
+(define-constant err-template-already-exists (err u114))
+(define-constant err-invalid-template (err u115))
 
 (define-data-var inheritance-counter uint u0)
+(define-data-var template-counter uint u0)
 
 (define-map inheritances
     uint
@@ -53,6 +57,28 @@
 (define-map inheritance-guardian-list
     uint
     (list 10 principal)
+)
+
+(define-map inheritance-templates
+    uint
+    {
+        creator: principal,
+        name: (string-ascii 64),
+        beneficiary: principal,
+        unlock-delay: uint,
+        guardians: (list 10 principal),
+        required-approvals: uint,
+        created-at: uint,
+        active: bool,
+    }
+)
+
+(define-map template-name-map
+    {
+        creator: principal,
+        name: (string-ascii 64),
+    }
+    uint
 )
 
 (define-read-only (get-inheritance (inheritance-id uint))
@@ -499,4 +525,181 @@
         })
         err-not-found
     )
+)
+
+(define-public (create-batch-inheritances (inheritance-data (list
+    20
+    {
+        nft-contract: principal,
+        token-id: uint,
+        beneficiary: principal,
+        unlock-delay: uint,
+        guardians: (list 10 principal),
+        required-approvals: uint,
+    }
+)))
+    (let ((results (map create-single-inheritance-batch inheritance-data)))
+        (ok results)
+    )
+)
+
+(define-private (create-single-inheritance-batch (data {
+    nft-contract: principal,
+    token-id: uint,
+    beneficiary: principal,
+    unlock-delay: uint,
+    guardians: (list 10 principal),
+    required-approvals: uint,
+}))
+    (let (
+            (nft-contract (get nft-contract data))
+            (token-id (get token-id data))
+            (beneficiary (get beneficiary data))
+            (unlock-delay (get unlock-delay data))
+            (guardians (get guardians data))
+            (required-approvals (get required-approvals data))
+        )
+        (create-inheritance nft-contract token-id beneficiary unlock-delay
+            guardians required-approvals
+        )
+    )
+)
+
+(define-public (batch-approve-inheritances (inheritance-ids (list 50 uint)))
+    (let ((results (map approve-inheritance inheritance-ids)))
+        (ok results)
+    )
+)
+
+(define-public (batch-revoke-approvals (inheritance-ids (list 50 uint)))
+    (let ((results (map revoke-approval inheritance-ids)))
+        (ok results)
+    )
+)
+
+(define-public (batch-claim-inheritances (inheritance-ids (list 50 uint)))
+    (let ((results (map claim-inheritance inheritance-ids)))
+        (ok results)
+    )
+)
+
+(define-public (create-template
+        (name (string-ascii 64))
+        (beneficiary principal)
+        (unlock-delay uint)
+        (guardians (list 10 principal))
+        (required-approvals uint)
+    )
+    (let (
+            (template-id (+ (var-get template-counter) u1))
+            (guardian-count (len guardians))
+            (template-key {
+                creator: tx-sender,
+                name: name,
+            })
+        )
+        (asserts! (not (is-eq tx-sender beneficiary)) err-invalid-beneficiary)
+        (asserts! (<= guardian-count u10) err-max-guardians-exceeded)
+        (asserts! (<= required-approvals guardian-count)
+            err-insufficient-approvals
+        )
+        (asserts! (> required-approvals u0) err-insufficient-approvals)
+        (asserts! (> (len name) u0) err-invalid-template)
+        (asserts! (is-none (map-get? template-name-map template-key))
+            err-template-already-exists
+        )
+
+        (map-set inheritance-templates template-id {
+            creator: tx-sender,
+            name: name,
+            beneficiary: beneficiary,
+            unlock-delay: unlock-delay,
+            guardians: guardians,
+            required-approvals: required-approvals,
+            created-at: stacks-block-height,
+            active: true,
+        })
+
+        (map-set template-name-map template-key template-id)
+        (var-set template-counter template-id)
+
+        (ok template-id)
+    )
+)
+
+(define-public (create-inheritance-from-template
+        (template-id uint)
+        (nft-contract principal)
+        (token-id uint)
+        (beneficiary-override (optional principal))
+    )
+    (match (map-get? inheritance-templates template-id)
+        template (begin
+            (asserts! (get active template) err-template-not-found)
+            (let (
+                    (final-beneficiary (default-to (get beneficiary template) beneficiary-override))
+                    (unlock-delay (get unlock-delay template))
+                    (guardians (get guardians template))
+                    (required-approvals (get required-approvals template))
+                )
+                (create-inheritance nft-contract token-id final-beneficiary
+                    unlock-delay guardians required-approvals
+                )
+            )
+        )
+        err-template-not-found
+    )
+)
+
+(define-public (deactivate-template (template-id uint))
+    (match (map-get? inheritance-templates template-id)
+        template (begin
+            (asserts! (is-eq tx-sender (get creator template)) err-unauthorized)
+            (asserts! (get active template) err-template-not-found)
+
+            (map-set inheritance-templates template-id
+                (merge template { active: false })
+            )
+            (ok true)
+        )
+        err-template-not-found
+    )
+)
+
+(define-read-only (get-template (template-id uint))
+    (map-get? inheritance-templates template-id)
+)
+
+(define-read-only (get-template-by-name
+        (creator principal)
+        (name (string-ascii 64))
+    )
+    (match (map-get? template-name-map {
+        creator: creator,
+        name: name,
+    })
+        template-id (get-template template-id)
+        none
+    )
+)
+
+(define-read-only (get-template-details (template-id uint))
+    (match (get-template template-id)
+        template (ok {
+            id: template-id,
+            creator: (get creator template),
+            name: (get name template),
+            beneficiary: (get beneficiary template),
+            unlock-delay: (get unlock-delay template),
+            guardians: (get guardians template),
+            required-approvals: (get required-approvals template),
+            created-at: (get created-at template),
+            active: (get active template),
+        })
+        err-template-not-found
+    )
+)
+
+(define-read-only (get-total-templates)
+    (var-get template-counter)
 )
