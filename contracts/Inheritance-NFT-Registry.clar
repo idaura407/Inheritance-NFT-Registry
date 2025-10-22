@@ -15,9 +15,14 @@
 (define-constant err-template-not-found (err u113))
 (define-constant err-template-already-exists (err u114))
 (define-constant err-invalid-template (err u115))
+(define-constant err-documentation-not-found (err u116))
+(define-constant err-documentation-already-exists (err u117))
+(define-constant err-already-acknowledged (err u118))
+(define-constant err-not-acknowledged (err u119))
 
 (define-data-var inheritance-counter uint u0)
 (define-data-var template-counter uint u0)
+(define-data-var documentation-counter uint u0)
 
 (define-map inheritances
     uint
@@ -79,6 +84,35 @@
         name: (string-ascii 64),
     }
     uint
+)
+
+(define-map nft-heritage-documentation
+    {
+        nft-contract: principal,
+        token-id: uint,
+    }
+    {
+        owner: principal,
+        title: (string-ascii 100),
+        story: (string-utf8 500),
+        sentimental-value: (string-utf8 200),
+        special-instructions: (string-utf8 300),
+        estimated-value: uint,
+        created-at: uint,
+        last-updated: uint,
+        is-public: bool,
+    }
+)
+
+(define-map beneficiary-acknowledgments
+    {
+        inheritance-id: uint,
+        beneficiary: principal,
+    }
+    {
+        acknowledged: bool,
+        acknowledged-at: uint,
+    }
 )
 
 (define-read-only (get-inheritance (inheritance-id uint))
@@ -702,4 +736,318 @@
 
 (define-read-only (get-total-templates)
     (var-get template-counter)
+)
+
+(define-public (create-nft-documentation
+        (nft-contract principal)
+        (token-id uint)
+        (title (string-ascii 100))
+        (story (string-utf8 500))
+        (sentimental-value (string-utf8 200))
+        (special-instructions (string-utf8 300))
+        (estimated-value uint)
+        (is-public bool)
+    )
+    (let ((nft-key {
+            nft-contract: nft-contract,
+            token-id: token-id,
+        }))
+        (asserts! (is-none (map-get? nft-heritage-documentation nft-key))
+            err-documentation-already-exists
+        )
+        (asserts! (> (len title) u0) err-invalid-template)
+
+        (map-set nft-heritage-documentation nft-key {
+            owner: tx-sender,
+            title: title,
+            story: story,
+            sentimental-value: sentimental-value,
+            special-instructions: special-instructions,
+            estimated-value: estimated-value,
+            created-at: stacks-block-height,
+            last-updated: stacks-block-height,
+            is-public: is-public,
+        })
+
+        (var-set documentation-counter (+ (var-get documentation-counter) u1))
+        (ok true)
+    )
+)
+
+(define-public (update-nft-documentation
+        (nft-contract principal)
+        (token-id uint)
+        (title (optional (string-ascii 100)))
+        (story (optional (string-utf8 500)))
+        (sentimental-value (optional (string-utf8 200)))
+        (special-instructions (optional (string-utf8 300)))
+        (estimated-value (optional uint))
+        (is-public (optional bool))
+    )
+    (let ((nft-key {
+            nft-contract: nft-contract,
+            token-id: token-id,
+        }))
+        (match (map-get? nft-heritage-documentation nft-key)
+            current-doc (begin
+                (asserts! (is-eq tx-sender (get owner current-doc))
+                    err-unauthorized
+                )
+
+                (map-set nft-heritage-documentation nft-key {
+                    owner: (get owner current-doc),
+                    title: (default-to (get title current-doc) title),
+                    story: (default-to (get story current-doc) story),
+                    sentimental-value: (default-to (get sentimental-value current-doc)
+                        sentimental-value
+                    ),
+                    special-instructions: (default-to (get special-instructions current-doc)
+                        special-instructions
+                    ),
+                    estimated-value: (default-to (get estimated-value current-doc) estimated-value),
+                    created-at: (get created-at current-doc),
+                    last-updated: stacks-block-height,
+                    is-public: (default-to (get is-public current-doc) is-public),
+                })
+                (ok true)
+            )
+            err-documentation-not-found
+        )
+    )
+)
+
+(define-public (transfer-documentation-ownership
+        (nft-contract principal)
+        (token-id uint)
+        (new-owner principal)
+    )
+    (let ((nft-key {
+            nft-contract: nft-contract,
+            token-id: token-id,
+        }))
+        (match (map-get? nft-heritage-documentation nft-key)
+            current-doc (begin
+                (asserts! (is-eq tx-sender (get owner current-doc))
+                    err-unauthorized
+                )
+
+                (map-set nft-heritage-documentation nft-key
+                    (merge current-doc {
+                        owner: new-owner,
+                        last-updated: stacks-block-height,
+                    })
+                )
+                (ok true)
+            )
+            err-documentation-not-found
+        )
+    )
+)
+
+(define-public (remove-nft-documentation
+        (nft-contract principal)
+        (token-id uint)
+    )
+    (let ((nft-key {
+            nft-contract: nft-contract,
+            token-id: token-id,
+        }))
+        (match (map-get? nft-heritage-documentation nft-key)
+            current-doc (begin
+                (asserts! (is-eq tx-sender (get owner current-doc))
+                    err-unauthorized
+                )
+
+                (map-delete nft-heritage-documentation nft-key)
+                (ok true)
+            )
+            err-documentation-not-found
+        )
+    )
+)
+
+(define-read-only (get-nft-documentation
+        (nft-contract principal)
+        (token-id uint)
+    )
+    (map-get? nft-heritage-documentation {
+        nft-contract: nft-contract,
+        token-id: token-id,
+    })
+)
+
+(define-read-only (get-nft-documentation-details
+        (nft-contract principal)
+        (token-id uint)
+    )
+    (let ((nft-key {
+            nft-contract: nft-contract,
+            token-id: token-id,
+        }))
+        (match (map-get? nft-heritage-documentation nft-key)
+            doc (ok {
+                nft-contract: nft-contract,
+                token-id: token-id,
+                owner: (get owner doc),
+                title: (get title doc),
+                story: (get story doc),
+                sentimental-value: (get sentimental-value doc),
+                special-instructions: (get special-instructions doc),
+                estimated-value: (get estimated-value doc),
+                created-at: (get created-at doc),
+                last-updated: (get last-updated doc),
+                is-public: (get is-public doc),
+                has-inheritance: (is-some (get-inheritance-by-nft nft-contract token-id)),
+            })
+            err-documentation-not-found
+        )
+    )
+)
+
+(define-read-only (get-public-nft-documentation
+        (nft-contract principal)
+        (token-id uint)
+    )
+    (let ((nft-key {
+            nft-contract: nft-contract,
+            token-id: token-id,
+        }))
+        (match (map-get? nft-heritage-documentation nft-key)
+            doc (if (get is-public doc)
+                (some {
+                    nft-contract: nft-contract,
+                    token-id: token-id,
+                    title: (get title doc),
+                    story: (get story doc),
+                    sentimental-value: (get sentimental-value doc),
+                    estimated-value: (get estimated-value doc),
+                    created-at: (get created-at doc),
+                    last-updated: (get last-updated doc),
+                })
+                none
+            )
+            none
+        )
+    )
+)
+
+(define-read-only (has-nft-documentation
+        (nft-contract principal)
+        (token-id uint)
+    )
+    (is-some (map-get? nft-heritage-documentation {
+        nft-contract: nft-contract,
+        token-id: token-id,
+    }))
+)
+
+(define-read-only (get-documentation-owner
+        (nft-contract principal)
+        (token-id uint)
+    )
+    (match (map-get? nft-heritage-documentation {
+        nft-contract: nft-contract,
+        token-id: token-id,
+    })
+        doc (ok (get owner doc))
+        err-documentation-not-found
+    )
+)
+
+(define-read-only (get-total-documentation-entries)
+    (var-get documentation-counter)
+)
+
+(define-public (acknowledge-inheritance (inheritance-id uint))
+    (match (get-inheritance inheritance-id)
+        inheritance (begin
+            (asserts! (is-eq tx-sender (get beneficiary inheritance))
+                err-unauthorized
+            )
+            (asserts! (get active inheritance) err-inactive-inheritance)
+            (asserts! (not (get claimed inheritance)) err-already-claimed)
+
+            (let ((ack-key {
+                    inheritance-id: inheritance-id,
+                    beneficiary: tx-sender,
+                }))
+                (asserts!
+                    (is-none (map-get? beneficiary-acknowledgments ack-key))
+                    err-already-acknowledged
+                )
+
+                (map-set beneficiary-acknowledgments ack-key {
+                    acknowledged: true,
+                    acknowledged-at: stacks-block-height,
+                })
+                (ok true)
+            )
+        )
+        err-not-found
+    )
+)
+
+(define-public (revoke-acknowledgment (inheritance-id uint))
+    (match (get-inheritance inheritance-id)
+        inheritance (begin
+            (asserts! (is-eq tx-sender (get beneficiary inheritance))
+                err-unauthorized
+            )
+            (asserts! (get active inheritance) err-inactive-inheritance)
+            (asserts! (not (get claimed inheritance)) err-already-claimed)
+
+            (let ((ack-key {
+                    inheritance-id: inheritance-id,
+                    beneficiary: tx-sender,
+                }))
+                (asserts!
+                    (is-some (map-get? beneficiary-acknowledgments ack-key))
+                    err-not-acknowledged
+                )
+
+                (map-delete beneficiary-acknowledgments ack-key)
+                (ok true)
+            )
+        )
+        err-not-found
+    )
+)
+
+(define-read-only (get-beneficiary-acknowledgment
+        (inheritance-id uint)
+        (beneficiary principal)
+    )
+    (map-get? beneficiary-acknowledgments {
+        inheritance-id: inheritance-id,
+        beneficiary: beneficiary,
+    })
+)
+
+(define-read-only (is-inheritance-acknowledged (inheritance-id uint))
+    (match (get-inheritance inheritance-id)
+        inheritance (is-some (get-beneficiary-acknowledgment inheritance-id
+            (get beneficiary inheritance)
+        ))
+        false
+    )
+)
+
+(define-read-only (get-acknowledgment-status (inheritance-id uint))
+    (match (get-inheritance inheritance-id)
+        inheritance (match (get-beneficiary-acknowledgment inheritance-id
+            (get beneficiary inheritance)
+        )
+            acknowledgment (ok {
+                acknowledged: (get acknowledged acknowledgment),
+                acknowledged-at: (get acknowledged-at acknowledgment),
+                beneficiary: (get beneficiary inheritance),
+            })
+            (ok {
+                acknowledged: false,
+                acknowledged-at: u0,
+                beneficiary: (get beneficiary inheritance),
+            })
+        )
+        err-not-found
+    )
 )
