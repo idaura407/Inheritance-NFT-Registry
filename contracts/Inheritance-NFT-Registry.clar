@@ -19,6 +19,8 @@
 (define-constant err-documentation-already-exists (err u117))
 (define-constant err-already-acknowledged (err u118))
 (define-constant err-not-acknowledged (err u119))
+(define-constant err-owner-index-full (err u120))
+(define-constant err-beneficiary-index-full (err u121))
 
 (define-data-var inheritance-counter uint u0)
 (define-data-var template-counter uint u0)
@@ -115,6 +117,32 @@
     }
 )
 
+(define-map owner-inheritance-count
+    principal
+    uint
+)
+
+(define-map owner-inheritance-index
+    {
+        owner: principal,
+        index: uint,
+    }
+    uint
+)
+
+(define-map beneficiary-inheritance-count
+    principal
+    uint
+)
+
+(define-map beneficiary-inheritance-index
+    {
+        beneficiary: principal,
+        index: uint,
+    }
+    uint
+)
+
 (define-read-only (get-inheritance (inheritance-id uint))
     (map-get? inheritances inheritance-id)
 )
@@ -178,6 +206,34 @@
     (var-get inheritance-counter)
 )
 
+(define-read-only (get-owner-inheritance-count (owner principal))
+    (default-to u0 (map-get? owner-inheritance-count owner))
+)
+
+(define-read-only (get-owner-inheritance-at
+        (owner principal)
+        (index uint)
+    )
+    (map-get? owner-inheritance-index {
+        owner: owner,
+        index: index,
+    })
+)
+
+(define-read-only (get-beneficiary-inheritance-count (beneficiary principal))
+    (default-to u0 (map-get? beneficiary-inheritance-count beneficiary))
+)
+
+(define-read-only (get-beneficiary-inheritance-at
+        (beneficiary principal)
+        (index uint)
+    )
+    (map-get? beneficiary-inheritance-index {
+        beneficiary: beneficiary,
+        index: index,
+    })
+)
+
 (define-public (create-inheritance
         (nft-contract principal)
         (token-id uint)
@@ -227,6 +283,34 @@
             inheritance-id
         )
         (var-set inheritance-counter inheritance-id)
+
+        (let (
+                (owner-count (default-to u0 (map-get? owner-inheritance-count tx-sender)))
+                (beneficiary-count (default-to u0
+                    (map-get? beneficiary-inheritance-count beneficiary)
+                ))
+                (next-owner-index (+ owner-count u1))
+                (next-beneficiary-index (+ beneficiary-count u1))
+            )
+            (asserts! (<= next-owner-index u200) err-owner-index-full)
+            (asserts! (<= next-beneficiary-index u200) err-beneficiary-index-full)
+            (map-set owner-inheritance-count tx-sender next-owner-index)
+            (map-set beneficiary-inheritance-count beneficiary
+                next-beneficiary-index
+            )
+            (map-set owner-inheritance-index {
+                owner: tx-sender,
+                index: next-owner-index,
+            }
+                inheritance-id
+            )
+            (map-set beneficiary-inheritance-index {
+                beneficiary: beneficiary,
+                index: next-beneficiary-index,
+            }
+                inheritance-id
+            )
+        )
 
         (ok inheritance-id)
     )
